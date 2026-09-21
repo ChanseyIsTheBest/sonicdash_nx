@@ -5,7 +5,7 @@ This is a native wrapper / loader that runs the original ARM64 Android build of 
 ## Install & run
  
 You need files from your own copy of Sonic Dash v10.3.1. It ships as an App Bundle, so that is three APKs.
-```
+
  
 ```
 sdmc:/switch/sonicdash_nx
