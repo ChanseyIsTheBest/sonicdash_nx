@@ -78,7 +78,7 @@ int debugPrintf(char *text, ...) {
   va_list list;
   if (log_is_noisy(text)) return 0;
   mutexLock(&g_log_lock);
-  if (!f) f = fopen(LOG_NAME, "a");
+  if (!f) { char lp[320]; snprintf(lp, sizeof lp, "%s/debug.log", GAME_HOME); f = fopen(lp, "a"); }
   if (f) { va_start(list, text); vfprintf(f, text, list); va_end(list); fflush(f); }
   mutexUnlock(&g_log_lock);
 #else

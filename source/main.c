@@ -389,9 +389,10 @@ static void nx_applet_hook(AppletHookType hook, void *param) {
 }
 
 int main(int argc, char *argv[]) {
-  (void)argc; (void)argv;
+  sd_home_init(argc, argv);   /* the game folder: the .nro's own (argv[0]) -- before the first log line */
   socketInitializeDefault();
   debugPrintf("[boot] === sonicdash_nx start (Unity 6000.0.72f1, libunity BuildID 6618ff361333edc4) ===\n");
+  debugPrintf("[boot] game folder: %s (%s)\n", GAME_HOME, sd_home_source());
   nro_range_init();
 
   /* CWD fix: title-override leaves cwd at the .nro folder or SD root; Unity reads many
@@ -484,7 +485,7 @@ int main(int argc, char *argv[]) {
       while ((de = readdir(dd))) {
         if (strncasecmp(de->d_name, "CASESENSITIVETEST", 17) == 0 ||
             strcmp(de->d_name, ".casetest") == 0) {
-          char pth[320]; snprintf(pth, sizeof pth, DATA_ROOT "/%s", de->d_name);
+          char pth[320]; snprintf(pth, sizeof pth, "%s/%s", DATA_ROOT, de->d_name);
           if (unlink(pth) == 0) swept++;
         }
       }

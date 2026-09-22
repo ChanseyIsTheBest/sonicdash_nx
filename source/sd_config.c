@@ -130,7 +130,7 @@ static void apply(const char *key, const char *val) {
 }
 
 void sd_config_load(void) {
-  const char *path = GAME_HOME "/config.txt";
+  char path[320]; snprintf(path, sizeof path, "%s/config.txt", GAME_HOME);
   char *text = NULL; long n = 0;
   FILE *f = fopen(path, "rb");
   if (f) {

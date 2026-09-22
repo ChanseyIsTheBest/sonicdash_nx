@@ -51,11 +51,17 @@
 #define SD_APP_GUID      "e9f8ebc9-6e7c-4fe0-8c68-5083e91f73da"  /* unity_app_guid */
 
 #define CONFIG_NAME "config.txt"
-#define LOG_NAME    "sdmc:/switch/sonicdash_nx/debug.log"
+/* debug.log lives in GAME_HOME (util.c builds the path when it first opens). */
 
 /* Game data root == the .nro's own folder (SoLoader SD convention):
  * nro + libs + assets all live in sdmc:/switch/sonicdash_nx/. */
-#define GAME_HOME   "sdmc:/switch/sonicdash_nx"
+/* The game folder: wherever the .nro was launched from (argv[0]), decided as
+ * the first statement of main() -- sd_home.c. A launcher that passes no usable
+ * path gets SD_DEFAULT_HOME (sdmc:/switch/sonicdash_nx). A RUNTIME value: build
+ * paths with snprintf("%s/...", GAME_HOME), never by gluing string literals --
+ * gluing no longer compiles, which is the point. */
+#include "sd_home.h"
+#define GAME_HOME   (sd_home())
 
 /* flip to 1 (and rebuild) for on-hardware file logging (debug.log) */
 #define DEBUG_LOG 0

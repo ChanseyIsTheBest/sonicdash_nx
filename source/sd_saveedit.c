@@ -278,6 +278,44 @@ static int apply_all(Save *s, const char *key, const char *val, int is_num, int 
   return changed ? 1 : 0;
 }
 
+/* PowerUpValues JSON, exactly as the game writes it: {"m_data":[e,e,...]} with
+ * each entry (count << 9) | type. Decoded from the game's own serialiser:
+ * OnBeforeSerialize packs `orr w8, w9, w8, lsl #9` (type | count << 9);
+ * OnAfterDeserialize unpacks type = e & 0x1FF, count = e >> 9. count 0 removes
+ * the type's entry. Every other entry is kept as it was, in order. Returns 1
+ * changed, 0 unchanged, -1 if the value is not in that form. */
+static int powerup_set(char **json, unsigned type, unsigned count) {
+  const char *a = strstr(*json, "\"m_data\":[");
+  if (!a) return -1;
+  const char *p = a + 10, *close = strchr(p, ']');
+  if (!close) return -1;
+  unsigned vals[64]; int n = 0, found = -1;
+  while (p < close) {
+    while (p < close && (*p == ' ' || *p == ',')) p++;
+    if (p >= close) break;
+    char *e; const unsigned long v = strtoul(p, &e, 10);
+    if (e == p || e > close || n >= 63) return -1;
+    if ((v & 0x1FF) == type) found = n;
+    vals[n++] = (unsigned)v; p = e;
+  }
+  const unsigned want = (count << 9) | type;
+  if (count) {
+    if (found >= 0) { if (vals[found] == want) return 0; vals[found] = want; }
+    else vals[n++] = want;
+  } else {
+    if (found < 0) return 0;
+    memmove(&vals[found], &vals[found + 1], (size_t)(n - found - 1) * sizeof vals[0]); n--;
+  }
+  const size_t pre = (size_t)(a + 10 - *json), post = strlen(close);
+  char *out = malloc(pre + (size_t)n * 12 + post + 1);
+  if (!out) return -1;
+  memcpy(out, *json, pre); size_t o = pre;
+  for (int i = 0; i < n; i++) o += (size_t)sprintf(out + o, i ? ",%u" : "%u", vals[i]);
+  memcpy(out + o, close, post + 1);
+  free(*json); *json = out;
+  return 1;
+}
+
 static int apply_setting(Save *s, const char *key, const char *val) {
   for (size_t i = 0; i < sizeof k_alias / sizeof k_alias[0]; i++) {
     if (strcmp(key, k_alias[i].name)) continue;
@@ -288,6 +326,22 @@ static int apply_setting(Save *s, const char *key, const char *val) {
     SE_LOG("[saveedit] %s: %s -> %s\n", key, p->value, val);
     free(p->value); p->value = dupn(val, strlen(val));
     return 1;
+  }
+  /* free_revive / double_rings: PowerUpsInventory's two SinglePurchasePowerUps
+   * (PowerUpType.FreeRevive = 10, DoubleRing = 7). Both are SharedPowerUps, so
+   * they live in SharedPowerUpCount, not in a character's entry; owning one is
+   * a count of 1. ShouldFreeReviveShow offers the free revive when the count is
+   * >= 1, once per run, and using it does not consume it. */
+  if (!strcasecmp(key, "free_revive") || !strcasecmp(key, "double_rings")) {
+    const unsigned type = !strcasecmp(key, "free_revive") ? 10u : 7u;
+    const int on = !strcasecmp(val, "true") || !strcmp(val, "1");
+    if (!on && strcasecmp(val, "false") && strcmp(val, "0")) { SE_LOG("[saveedit] %s = %s: use true or false -- skipped\n", key, val); return -1; }
+    Pair *p = find_prop(s, "SharedPowerUpCount");
+    if (!p) { SE_LOG("[saveedit] %s: SharedPowerUpCount is not in save.txt yet (play one run first) -- skipped\n", key); return -1; }
+    const int r = powerup_set(&p->value, type, on ? 1u : 0u);
+    if (r < 0) { SE_LOG("[saveedit] %s: SharedPowerUpCount is not in the form the game writes -- skipped\n", key); return -1; }
+    if (r > 0) SE_LOG("[saveedit] %s = %s\n", key, val);
+    return r;
   }
   if (!strncmp(key, "char.", 5)) {
     char name[64], field[16];
@@ -371,6 +425,16 @@ static const char *const ALL_BLOCK[] = {
   "#char.all.owned = true",
 };
 #define ALL_BLOCK_N ((int)(sizeof ALL_BLOCK / sizeof ALL_BLOCK[0]))
+#define POWER_MARKER "# --- power-ups ---"
+static const char *const POWER_BLOCK[] = {
+  POWER_MARKER "-------------------------------------------------------",
+  "# One-off purchases the game sells, kept in SharedPowerUpCount. free_revive",
+  "# gives you one free revive in every run; double_rings doubles the rings",
+  "# you collect. false takes either away again.",
+  "#free_revive = true",
+  "#double_rings = true",
+};
+#define POWER_BLOCK_N ((int)(sizeof POWER_BLOCK / sizeof POWER_BLOCK[0]))
 #define OWNED_NOTE_1 "# owned = true unlocks a character: crossovers (LEGO, Movie, Sanrio, Pac-Man,"
 #define OWNED_NOTE_2 "# Angry Birds...) are limited edition and only appear in the menu once owned."
 static void write_roster(FILE *f) {
@@ -428,16 +492,27 @@ static int add_owned_lines(const char *edit_path, const char *text, size_t len) 
   }
   for (int i = 0; i < SD_CHARACTER_COUNT; i++) missing += !have[i];
   const int need_all = strstr(text, ALL_MARKER) == NULL;  /* the char.all block, above the list */
-  if (!missing && !need_all) return 0;
+  const int need_power = strstr(text, POWER_MARKER) == NULL;  /* free_revive / double_rings */
+  if (!missing && !need_all && !need_power) return 0;
   const int note = strstr(text, OWNED_NOTE_1) == NULL;  /* one line: matches CRLF files too */
-  char *out = malloc(len + (size_t)missing * 96 + 1024);
+  char *out = malloc(len + (size_t)missing * 96 + 2048);
   if (!out) return 0;
   size_t o = 0; int inserted = 0;
   const char *me = memchr(m, '\n', (size_t)(end - m));
   const char *head_end = me ? me + 1 : end;            /* up to and including the marker line */
   const char *ms = m;                                  /* start of the marker line */
   while (ms > text && ms[-1] != '\n') ms--;
-  memcpy(out, text, (size_t)(ms - text)); o = (size_t)(ms - text);
+  const char *cs = ms;                                 /* the power-ups block goes above "characters" */
+  if (need_power) {
+    const char *ch = strstr(text, "# --- characters");
+    if (ch && ch < ms) { cs = ch; while (cs > text && cs[-1] != '\n') cs--; }
+  }
+  memcpy(out, text, (size_t)(cs - text)); o = (size_t)(cs - text);
+  if (need_power) {
+    for (int i = 0; i < POWER_BLOCK_N; i++) o += (size_t)sprintf(out + o, "%s%s", POWER_BLOCK[i], nl);
+    o += (size_t)sprintf(out + o, "%s", nl);
+  }
+  memcpy(out + o, cs, (size_t)(ms - cs)); o += (size_t)(ms - cs);
   if (need_all) {                                      /* char.all block + blank line, above the list */
     for (int i = 0; i < ALL_BLOCK_N; i++) o += (size_t)sprintf(out + o, "%s%s", ALL_BLOCK[i], nl);
     o += (size_t)sprintf(out + o, "%s", nl);
@@ -455,12 +530,13 @@ static int add_owned_lines(const char *edit_path, const char *text, size_t len) 
     }
     p = next;
   }
-  if (inserted || need_all) {
+  if (inserted || need_all || need_power) {
     char tmp[512]; snprintf(tmp, sizeof tmp, "%s.tmp", edit_path);
     int ok = write_file(tmp, out, o);
     if (ok) { remove(edit_path); ok = rename(tmp, edit_path) == 0 || write_file(edit_path, out, o); }
     if (ok && inserted) SE_LOG("[saveedit] added an owned = true line under %d character(s) in save_edit.txt\n", inserted);
     if (ok && need_all) SE_LOG("[saveedit] added the char.all lines (every character at once) to save_edit.txt\n");
+    if (ok && need_power) SE_LOG("[saveedit] added the power-ups lines (free_revive, double_rings) to save_edit.txt\n");
     if (!ok) SE_LOG("[saveedit] could not update the character list in save_edit.txt\n");
     if (!ok) inserted = 0;
   }
@@ -505,7 +581,9 @@ static void write_template(const char *path) {
 "\n"
 "# --- player --------------------------------------------------------------\n"
 "#xp = 5000\n"
-"\n"
+"\n", f);
+  for (int i = 0; i < POWER_BLOCK_N; i++) { fputs(POWER_BLOCK[i], f); fputs("\n", f); }
+  fputs("\n"
 "# --- characters ----------------------------------------------------------\n"
 "# char.<Name>.level and .cards set a character's level and card count. Every\n"
 "# character's name is listed at the end of this file; any capitalisation works.\n"
@@ -549,6 +627,8 @@ int sd_saveedit_run_paths(const char *save_path, const char *edit_path) {
       write_roster(af);
       fclose(af);
       SE_LOG("[saveedit] added the full character list (%d) to %s\n", SD_CHARACTER_COUNT, edit_path);
+      size_t l2 = 0; char *again = read_file(edit_path, &l2);   /* and the blocks it still lacks */
+      if (again) { add_owned_lines(edit_path, again, l2); free(again); }
     }
   } else {
     add_owned_lines(edit_path, edit, elen);             /* a roster from before owned lines */
@@ -635,7 +715,10 @@ int sd_saveedit_run_paths(const char *save_path, const char *edit_path) {
 #ifdef __SWITCH__
 void sd_saveedit_run(void) {
 #if SD_SAVE_EDIT
-  sd_saveedit_run_paths(GAME_HOME "/save.txt", GAME_HOME "/save_edit.txt");
+  char sp[320], ep[320];
+  snprintf(sp, sizeof sp, "%s/save.txt", GAME_HOME);
+  snprintf(ep, sizeof ep, "%s/save_edit.txt", GAME_HOME);
+  sd_saveedit_run_paths(sp, ep);
 #endif
 }
 #endif

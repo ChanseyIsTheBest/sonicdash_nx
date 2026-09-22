@@ -559,7 +559,7 @@ void *sd_jni_object(void *recv, const void *id_, const char *eff, const void *jv
     if (has(m, "getAssetPackPath")) {
       const char *pack = str_arg(id, 0, jv, va);
       diag_log("[pad] getAssetPackPath(%s) -> %s/assets", pack ? pack : "?", GAME_HOME);
-      return jni_make_string(GAME_HOME "/assets");
+      { char a[320]; snprintf(a, sizeof a, "%s/assets", GAME_HOME); return jni_make_string(a); }
     }
   }
 
